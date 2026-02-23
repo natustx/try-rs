@@ -18,12 +18,12 @@ ratatui = "0.30.0"
 crossterm = "0.29.0"
 dirs = "6.0.0"
 fuzzy-matcher = "0.3.7"
-chrono = "0.4.43"
-anyhow = "1.0.100"
+chrono = "0.4.44"
+anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"], default-features = false }
-toml = "0.9.11+spec-1.1.0"
-clap = { version = "4.5.54", features = ["derive"] }
-libc = "0.2"
+toml = "1.0.3+spec-1.1.0"
+clap = { version = "4.5.60", features = ["derive"] }
+libc = "0.2.182"
 
 [dev-dependencies]
 tempdir = "0.3"
