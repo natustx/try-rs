@@ -67,6 +67,7 @@ pub struct App {
     pub wants_editor: bool,
     pub apply_date_prefix: Option<bool>,
     pub transparent_background: bool,
+    pub show_new_option: bool,
 
     pub available_themes: Vec<Theme>,
     pub theme_list_state: ListState,
@@ -161,6 +162,7 @@ impl App {
             wants_editor: false,
             apply_date_prefix,
             transparent_background,
+            show_new_option: false,
             available_themes: themes,
             theme_list_state: theme_state,
             original_theme: None,
@@ -183,6 +185,10 @@ impl App {
         app
     }
 
+    pub fn has_exact_match(&self) -> bool {
+        self.all_entries.iter().any(|e| e.name == self.query)
+    }
+
     pub fn update_search(&mut self) {
         let matcher = SkimMatcherV2::default();
 
@@ -203,6 +209,7 @@ impl App {
 
             self.filtered_entries.sort_by(|a, b| b.score.cmp(&a.score));
         }
+        self.show_new_option = !self.query.is_empty() && !self.has_exact_match();
         self.selected_index = 0;
     }
 
@@ -589,7 +596,7 @@ pub fn run_app(
             .alignment(Alignment::Center);
             f.render_widget(memory_info, search_chunks[1]);
 
-            let items: Vec<ListItem> = app
+            let mut items: Vec<ListItem> = app
                 .filtered_entries
                 .iter()
                 .map(|entry| {
@@ -670,6 +677,20 @@ pub fn run_app(
                 })
                 .collect();
 
+            // Append "new" option when no exact match
+            if app.show_new_option {
+                let new_item = ListItem::new(Line::from(vec![
+                    Span::styled("  ", Style::default().fg(app.theme.search_title)),
+                    Span::styled(
+                        format!("new {}", app.query),
+                        Style::default()
+                            .fg(app.theme.search_title)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+                items.push(new_item);
+            }
+
             let list = List::new(items)
                 .block(
                     Block::default()
@@ -698,7 +719,29 @@ pub fn run_app(
                 .constraints([Constraint::Min(1), Constraint::Length(4)])
                 .split(content_chunks[1]);
 
-            if let Some(selected) = app.filtered_entries.get(app.selected_index) {
+            // Check if "new" option is currently selected
+            let is_new_selected =
+                app.show_new_option && app.selected_index == app.filtered_entries.len();
+
+            if is_new_selected {
+                // Show "new folder" preview
+                let preview_lines = vec![Line::from(Span::styled(
+                    " (new folder) ",
+                    Style::default()
+                        .fg(app.theme.search_title)
+                        .add_modifier(Modifier::ITALIC),
+                ))];
+                let preview = Paragraph::new(preview_lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(Span::styled(
+                            " Preview ",
+                            Style::default().fg(app.theme.preview_title),
+                        ))
+                        .border_style(Style::default().fg(app.theme.preview_border)),
+                );
+                f.render_widget(preview, right_chunks[0]);
+            } else if let Some(selected) = app.filtered_entries.get(app.selected_index) {
                 let preview_path = app.base_path.join(&selected.name);
                 let mut preview_lines = Vec::new();
 
@@ -867,20 +910,27 @@ pub fn run_app(
                         if c == 'c' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
                             app.should_quit = true;
                         } else if c == 'd' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                            if !app.filtered_entries.is_empty() {
+                            let is_new_selected = app.show_new_option
+                                && app.selected_index == app.filtered_entries.len();
+                            if !app.filtered_entries.is_empty() && !is_new_selected {
                                 app.mode = AppMode::DeleteConfirm;
                             }
                         } else if c == 'e' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
                             if app.editor_cmd.is_some() {
-                                if !app.filtered_entries.is_empty() {
+                                let is_new_selected = app.show_new_option
+                                    && app.selected_index == app.filtered_entries.len();
+                                if is_new_selected {
+                                    app.final_selection = SelectionResult::New(app.query.clone());
+                                    app.wants_editor = true;
+                                    app.should_quit = true;
+                                } else if !app.filtered_entries.is_empty() {
                                     app.final_selection = SelectionResult::Folder(
                                         app.filtered_entries[app.selected_index].name.clone(),
                                     );
                                     app.wants_editor = true;
                                     app.should_quit = true;
                                 } else if !app.query.is_empty() {
-                                    app.final_selection =
-                                        SelectionResult::Folder(app.query.clone());
+                                    app.final_selection = SelectionResult::New(app.query.clone());
                                     app.wants_editor = true;
                                     app.should_quit = true;
                                 }
@@ -911,7 +961,12 @@ pub fn run_app(
                         } else if matches!(c, 'j' | 'n')
                             && key.modifiers.contains(event::KeyModifiers::CONTROL)
                         {
-                            if app.selected_index < app.filtered_entries.len().saturating_sub(1) {
+                            let max_index = if app.show_new_option {
+                                app.filtered_entries.len()
+                            } else {
+                                app.filtered_entries.len().saturating_sub(1)
+                            };
+                            if app.selected_index < max_index {
                                 app.selected_index += 1;
                             }
                         } else if c == 'u' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
@@ -934,12 +989,21 @@ pub fn run_app(
                         }
                     }
                     KeyCode::Down => {
-                        if app.selected_index < app.filtered_entries.len().saturating_sub(1) {
+                        let max_index = if app.show_new_option {
+                            app.filtered_entries.len()
+                        } else {
+                            app.filtered_entries.len().saturating_sub(1)
+                        };
+                        if app.selected_index < max_index {
                             app.selected_index += 1;
                         }
                     }
                     KeyCode::Enter => {
-                        if !app.filtered_entries.is_empty() {
+                        let is_new_selected =
+                            app.show_new_option && app.selected_index == app.filtered_entries.len();
+                        if is_new_selected {
+                            app.final_selection = SelectionResult::New(app.query.clone());
+                        } else if !app.filtered_entries.is_empty() {
                             app.final_selection = SelectionResult::Folder(
                                 app.filtered_entries[app.selected_index].name.clone(),
                             );

@@ -566,3 +566,74 @@ fn app_ignores_files() {
     assert_eq!(app.all_entries.len(), 1);
     assert_eq!(app.all_entries[0].name, "actual-dir");
 }
+
+#[test]
+fn app_show_new_option_on_partial_match() {
+    let tmp = TempDir::new("app-new-partial").unwrap();
+    std::fs::create_dir(tmp.path().join("try-rs")).unwrap();
+    std::fs::create_dir(tmp.path().join("try")).unwrap();
+
+    let theme = Theme::default();
+    let mut app = App::new(
+        tmp.path().to_path_buf(),
+        theme,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+
+    app.query = "tr".to_string();
+    app.update_search();
+
+    assert!(app.show_new_option);
+}
+
+#[test]
+fn app_hide_new_option_on_exact_match() {
+    let tmp = TempDir::new("app-new-exact").unwrap();
+    std::fs::create_dir(tmp.path().join("try-rs")).unwrap();
+    std::fs::create_dir(tmp.path().join("try")).unwrap();
+
+    let theme = Theme::default();
+    let mut app = App::new(
+        tmp.path().to_path_buf(),
+        theme,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+
+    app.query = "try".to_string();
+    app.update_search();
+    assert!(!app.show_new_option);
+
+    app.query = "try-rs".to_string();
+    app.update_search();
+    assert!(!app.show_new_option);
+}
+
+#[test]
+fn app_hide_new_option_on_empty_query() {
+    let tmp = TempDir::new("app-new-empty").unwrap();
+    std::fs::create_dir(tmp.path().join("try-rs")).unwrap();
+
+    let theme = Theme::default();
+    let mut app = App::new(
+        tmp.path().to_path_buf(),
+        theme,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+
+    app.query.clear();
+    app.update_search();
+
+    assert!(!app.show_new_option);
+}
