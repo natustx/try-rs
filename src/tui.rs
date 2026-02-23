@@ -682,7 +682,7 @@ pub fn run_app(
                 let new_item = ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default().fg(app.theme.search_title)),
                     Span::styled(
-                        format!("new {}", app.query),
+                        format!("Create new: {}", app.query),
                         Style::default()
                             .fg(app.theme.search_title)
                             .add_modifier(Modifier::ITALIC),
