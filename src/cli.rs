@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long)]
     pub setup_stdout: Option<Shell>,
 
+    /// Remove shell integration for all installed shells
+    #[arg(long)]
+    pub setup_clear: bool,
+
     /// Generate shell completion script for tab completion of directory names
     #[arg(long)]
     pub completions: Option<Shell>,

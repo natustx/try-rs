@@ -649,3 +649,139 @@ pub fn generate_completions(shell: &Shell) -> Result<()> {
     print!("{}", script);
     Ok(())
 }
+
+pub fn get_installed_shells() -> Vec<Shell> {
+    let mut shells = Vec::new();
+    for shell in [Shell::Fish, Shell::Zsh, Shell::Bash, Shell::PowerShell, Shell::NuShell] {
+        if is_shell_installed(&shell) {
+            shells.push(shell);
+        }
+    }
+    shells
+}
+
+fn is_shell_installed(shell: &Shell) -> bool {
+    let shell_name = match shell {
+        Shell::Fish => "fish",
+        Shell::Zsh => "zsh",
+        Shell::Bash => "bash",
+        Shell::PowerShell => "pwsh",
+        Shell::NuShell => "nu",
+    };
+
+    let output = std::process::Command::new("whereis")
+        .arg(shell_name)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let result = String::from_utf8_lossy(&out.stdout);
+            let trimmed = result.trim();
+            !trimmed.is_empty() && !trimmed.ends_with(':') && trimmed.starts_with(&format!("{}: ", shell_name))
+        }
+        Err(_) => false,
+    }
+}
+
+pub fn clear_shell_setup() -> Result<()> {
+    let installed_shells = get_installed_shells();
+    
+    if installed_shells.is_empty() {
+        eprintln!("No supported shells found on this system.");
+        return Ok(());
+    }
+
+    eprintln!("Detected shells: {:?}\n", installed_shells);
+    eprintln!("Files to be removed:");
+
+    for shell in &installed_shells {
+        let paths = get_shell_config_paths(shell);
+        
+        for path in &paths {
+            eprintln!("  - {}", path.display());
+        }
+
+        match shell {
+            Shell::Fish => {
+                let fish_functions = get_fish_functions_dir();
+                eprintln!("  - {}", fish_functions.join("try-rs-picker.fish").display());
+            }
+            _ => {}
+        }
+    }
+
+    eprintln!("\nRemoving files...");
+
+    for shell in &installed_shells {
+        clear_shell_config(shell)?;
+    }
+
+    eprintln!("\nDone! Shell integration removed.");
+    Ok(())
+}
+
+fn clear_shell_config(shell: &Shell) -> Result<()> {
+    let paths = get_shell_config_paths(shell);
+    
+    for path in &paths {
+        if path.exists() {
+            fs::remove_file(path)?;
+            eprintln!("Removed: {}", path.display());
+        }
+    }
+
+    match shell {
+        Shell::Fish => {
+            let fish_functions = get_fish_functions_dir();
+            let picker_path = fish_functions.join("try-rs-picker.fish");
+            if picker_path.exists() {
+                fs::remove_file(&picker_path)?;
+                eprintln!("Removed: {}", picker_path.display());
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn get_shell_config_paths(shell: &Shell) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let config_dir = get_base_config_dir();
+    let home_dir = dirs::home_dir().expect("Could not find home directory");
+
+    match shell {
+        Shell::Fish => {
+            let fish_functions = get_fish_functions_dir();
+            paths.push(fish_functions.join("try-rs.fish"));
+        }
+        Shell::Zsh => {
+            paths.push(config_dir.join("try-rs.zsh"));
+            if home_dir.join(".zshrc").exists() {
+                if let Ok(content) = fs::read_to_string(home_dir.join(".zshrc")) {
+                    if content.contains("try-rs") {
+                        paths.push(home_dir.join(".zshrc"));
+                    }
+                }
+            }
+        }
+        Shell::Bash => {
+            paths.push(config_dir.join("try-rs.bash"));
+            if home_dir.join(".bashrc").exists() {
+                if let Ok(content) = fs::read_to_string(home_dir.join(".bashrc")) {
+                    if content.contains("try-rs") {
+                        paths.push(home_dir.join(".bashrc"));
+                    }
+                }
+            }
+        }
+        Shell::PowerShell => {
+            paths.push(config_dir.join("try-rs.ps1"));
+        }
+        Shell::NuShell => {
+            paths.push(config_dir.join("try-rs.nu"));
+        }
+    }
+
+    paths
+}
