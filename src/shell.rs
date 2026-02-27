@@ -468,9 +468,7 @@ pub fn get_shell_integration_path(shell: &Shell) -> PathBuf {
     };
 
     match shell {
-        Shell::Fish => config_dir
-            .join("fish")
-            .join("functions")
+        Shell::Fish => get_fish_functions_dir()
             .join("try-rs.fish"),
         Shell::Zsh => config_dir.join("try-rs.zsh"),
         Shell::Bash => config_dir.join("try-rs.bash"),
@@ -479,10 +477,24 @@ pub fn get_shell_integration_path(shell: &Shell) -> PathBuf {
     }
 }
 
+fn get_fish_functions_dir() -> PathBuf {
+    if let Ok(output) = std::process::Command::new("fish")
+        .args(["-c", "echo $__fish_config_dir"])
+        .output()
+    {
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let path = PathBuf::from(output_str.trim()).join("functions");
+            if path.exists() || path.parent().map(|p| p.exists()).unwrap_or(false) {
+                return path;
+            }
+        }
+    }
+    get_base_config_dir().join("fish").join("functions")
+}
+
 fn write_fish_picker_function() -> Result<PathBuf> {
-    let file_path = get_base_config_dir()
-        .join("fish")
-        .join("functions")
+    let file_path = get_fish_functions_dir()
         .join("try-rs-picker.fish");
     if let Some(parent) = file_path.parent()
         && !parent.exists()
@@ -548,7 +560,7 @@ pub fn setup_shell(shell: &Shell) -> Result<()> {
     match shell {
         Shell::Fish => {
             let _picker_path = write_fish_picker_function()?;
-            let fish_config_path = get_base_config_dir().join("fish").join("config.fish");
+            let fish_config_path = home_dir.join(".config").join("fish").join("config.fish");
             eprintln!(
                 "You may need to restart your shell or run 'source {}' to apply changes.",
                 file_path.display()
