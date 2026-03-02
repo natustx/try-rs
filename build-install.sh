@@ -16,15 +16,15 @@ if [ -d .git ]; then
 fi
 
 # Clean stale build artifacts
-rm -f try-rs ~/prj/util/bin/try ~/prj/util/bin/try-rs
+rm -f try-rs ~/prj/util/bin/try-rs
 cargo clean
 
 # Build
 cargo build --release
 
-# Install binary as "try"
+# Install binary
 mkdir -p ~/prj/util/bin
-cp target/release/try-rs ~/prj/util/bin/try
-chmod +x ~/prj/util/bin/try
+cp target/release/try-rs ~/prj/util/bin/try-rs
+chmod +x ~/prj/util/bin/try-rs
 
-echo "Installed: $(~/prj/util/bin/try --version 2>/dev/null || echo 'try')"
+echo "Installed: $(~/prj/util/bin/try-rs --version 2>/dev/null || echo 'try-rs')"
