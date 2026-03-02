@@ -28,3 +28,10 @@ cp target/release/try-rs ~/prj/util/bin/try-rs
 chmod +x ~/prj/util/bin/try-rs
 
 echo "Installed: $(~/prj/util/bin/try-rs --version 2>/dev/null || echo 'try-rs')"
+
+# Shell integration (idempotent)
+ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+if [ -f "$ZSHRC" ]; then
+    grep -q 'TRY_PATH' "$ZSHRC" || echo 'export TRY_PATH="$HOME/prj/experiments"' >> "$ZSHRC"
+    grep -q 'try-rs --setup-stdout' "$ZSHRC" || echo 'eval "$(try-rs --setup-stdout zsh)"' >> "$ZSHRC"
+fi
