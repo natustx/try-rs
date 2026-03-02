@@ -29,9 +29,25 @@ chmod +x ~/prj/util/bin/try-rs
 
 echo "Installed: $(~/prj/util/bin/try-rs --version 2>/dev/null || echo 'try-rs')"
 
-# Shell integration (idempotent)
+# Shell integration (idempotent, marker-based)
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+MARKER_BEGIN="# >>> try-rs >>>"
+MARKER_END="# <<< try-rs <<<"
+BLOCK=$(cat <<'SHELL'
+# >>> try-rs >>>
+export TRY_PATH="$HOME/prj/experiments"
+eval "$(try-rs --setup-stdout zsh)"
+# <<< try-rs <<<
+SHELL
+)
+
 if [ -f "$ZSHRC" ]; then
-    grep -q 'TRY_PATH' "$ZSHRC" || echo 'export TRY_PATH="$HOME/prj/experiments"' >> "$ZSHRC"
-    grep -q 'try-rs --setup-stdout' "$ZSHRC" || echo 'eval "$(try-rs --setup-stdout zsh)"' >> "$ZSHRC"
+    if grep -q "$MARKER_BEGIN" "$ZSHRC"; then
+        # Replace existing block between markers
+        sed -i'' "/$MARKER_BEGIN/,/$MARKER_END/c\\
+$BLOCK" "$ZSHRC"
+    else
+        # Append new block
+        printf '\n%s\n' "$BLOCK" >> "$ZSHRC"
+    fi
 fi
