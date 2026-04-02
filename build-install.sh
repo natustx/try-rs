@@ -28,24 +28,3 @@ cp target/release/try-rs ~/prj/util/bin/try-rs
 chmod +x ~/prj/util/bin/try-rs
 
 echo "Installed: $(~/prj/util/bin/try-rs --version 2>/dev/null || echo 'try-rs')"
-
-# Shell integration (idempotent, marker-based)
-ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
-MARKER_BEGIN="# >>> try-rs >>>"
-MARKER_END="# <<< try-rs <<<"
-BLOCK=$(cat <<'SHELL'
-# >>> try-rs >>>
-export TRY_PATH="$HOME/prj/active/experiments"
-eval "$(try-rs --setup-stdout zsh)"
-# <<< try-rs <<<
-SHELL
-)
-
-if [ -f "$ZSHRC" ]; then
-    if grep -q "$MARKER_BEGIN" "$ZSHRC"; then
-        # Remove existing block between markers
-        sed -i'' "/$MARKER_BEGIN/,/$MARKER_END/d" "$ZSHRC"
-    fi
-    # Append block
-    printf '\n%s\n' "$BLOCK" >> "$ZSHRC"
-fi

@@ -69,6 +69,8 @@ fn get_completions_script_zsh_contains_function() {
     let script = get_completions_script(&Shell::Zsh);
     assert!(script.contains("_try_rs_get_tries_path"));
     assert!(script.contains("_try_rs_complete"));
+    assert!(script.contains("compdef _try_rs_complete try-rs"));
+    assert!(!script.contains("complete -o default -F _try_rs_complete try-rs"));
 }
 
 #[test]
