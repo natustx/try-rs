@@ -26,7 +26,7 @@
         packages.try-rs = pkgs.rustPlatform.buildRustPackage {
           pname = "try-rs";
 
-          version = "1.6.1";  # update when releasing new version
+          version = "1.7.8";  # update when releasing new version
 
           src = self; # uses the repo itself as source
 
@@ -34,7 +34,7 @@
             lockFile = ./Cargo.lock;
           };
 
-          nativeBuildInputs = [ pkgs.rust-bin.stable.latest.default ];
+          nativeBuildInputs = [ pkgs.rust-bin.stable.latest.default pkgs.git ];
 
           meta = with pkgs.lib; {
             description = "Temporary workspace manager with TUI";
@@ -50,6 +50,7 @@
           buildInputs = [
             pkgs.rust-bin.stable.latest.default
             pkgs.cargo
+            pkgs.git
           ];
         };
       }

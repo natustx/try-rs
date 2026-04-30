@@ -136,27 +136,37 @@ function try-rs {{
         }
         Shell::NuShell => {
             format!(
-                r#"def --wrapped try-rs [...args] {{
+                r#"def --env --wrapped try-rs [
+    name_or_url?: string@__try_rs_complete
+    ...args
+] {{
+    let all_args = (if $name_or_url == null {{ [] }} else {{ [$name_or_url] }} | append $args)
+
     # Pass flags/options directly to stdout without capturing
-    for arg in $args {{
-        if ($arg | str starts-with '-') {{
-            ^try-rs.exe ...$args
-            return
-        }}
+    if ($all_args | any {{ |arg| $arg | str starts-with '-' }}) {{
+        ^try-rs ...$all_args
+        return
     }}
 
     # Capture output. Stderr (TUI) goes directly to terminal.
-    let output = (try-rs.exe ...$args)
+    let output = (^try-rs ...$all_args | str trim)
 
     if ($output | is-not-empty) {{
-
-        # Grabs the path out of stdout returned by the binary and removes the single quotes
-        let $path = ($output | split row ' ').1 | str replace --all "'" ''
-        cd $path
+        if ($output | str starts-with "cd ") {{
+            # Grabs the path out of stdout returned by the binary and removes the single quotes
+            let path = ($output | str replace --regex '^cd ' '' | str replace --all "'" "" | str replace --all '"' "")
+            if ($path | path exists) {{
+                cd $path
+            }}
+        }} else {{
+            # If it's not a cd command, it's likely an editor command
+            nu -c $output
+        }}
     }}
 }}
 
-{completions}"#
+{completions}"#,
+                completions = get_completions_script(shell),
             )
         }
     }
@@ -171,7 +181,14 @@ pub fn get_completions_script(shell: &Shell) -> String {
 function __try_rs_get_tries_path
     # Check TRY_PATH environment variable first
     if set -q TRY_PATH
-        echo $TRY_PATH
+        # Check if contains comma
+        if echo "$TRY_PATH" | command grep -q ","
+            for path in (string split "," $TRY_PATH)
+                printf '%s\n' (string trim $path)
+            end
+        else
+            printf '%s\n' $TRY_PATH
+        end
         return
     end
     
@@ -179,26 +196,33 @@ function __try_rs_get_tries_path
     set -l config_paths "$HOME/.config/try-rs/config.toml" "$HOME/.try-rs/config.toml"
     for config_path in $config_paths
         if test -f $config_path
-            set -l tries_path (command grep -E '^\s*tries_path\s*=' $config_path 2>/dev/null | command sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | command sed "s|~|$HOME|" | string trim)
+            # Try tries_path (supports single or multiple paths with comma)
+            set -l tries_path (command grep -E '^\s*tries_path\s*=' $config_path 2>/dev/null | command sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' | command sed "s|~|$HOME|" | string trim)
             if test -n "$tries_path"
-                echo $tries_path
+                # Check if it contains comma (multiple paths)
+                if echo "$tries_path" | command grep -q ","
+                    for path in (string split "," $tries_path)
+                        printf '%s\n' (string trim $path)
+                    end
+                else
+                    printf '%s\n' $tries_path
+                end
                 return
             end
         end
     end
     
     # Default path
-    echo "$HOME/work/tries"
+    printf '%s\n' "$HOME/work/tries"
 end
 
 function __try_rs_complete_directories
-    set -l tries_path (__try_rs_get_tries_path)
-    
-    if test -d $tries_path
-        # List directories in tries_path, filtering by current token
-        command ls -1 $tries_path 2>/dev/null | while read -l dir
-            if test -d "$tries_path/$dir"
-                echo $dir
+    for tries_path in (__try_rs_get_tries_path)
+        if test -d $tries_path
+            command ls -1 $tries_path 2>/dev/null | while read -l dir
+                if test -d "$tries_path/$dir"
+                    echo $dir
+                end
             end
         end
     end
@@ -212,7 +236,11 @@ complete -f -c try-rs -n '__fish_use_subcommand' -a '(__try_rs_complete_director
 _try_rs_get_tries_path() {
     # Check TRY_PATH environment variable first
     if [[ -n "${TRY_PATH}" ]]; then
-        echo "${TRY_PATH}"
+        if [[ "${TRY_PATH}" == *","* ]]; then
+            echo "${TRY_PATH}" | tr ',' '\n'
+        else
+            echo "${TRY_PATH}"
+        fi
         return
     fi
     
@@ -220,9 +248,14 @@ _try_rs_get_tries_path() {
     local config_paths=("$HOME/.config/try-rs/config.toml" "$HOME/.try-rs/config.toml")
     for config_path in "${config_paths[@]}"; do
         if [[ -f "$config_path" ]]; then
-            local tries_path=$(grep -E '^\s*tries_path\s*=' "$config_path" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | sed "s|~|$HOME|" | tr -d '[:space:]')
+            # Try tries_path (supports single or multiple paths with comma)
+            local tries_path=$(grep -E '^[[:space:]]*tries_path[[:space:]]*=' "$config_path" 2>/dev/null | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' | sed "s|~|$HOME|" | tr -d '[:space:]')
             if [[ -n "$tries_path" ]]; then
-                echo "$tries_path"
+                if [[ "$tries_path" == *","* ]]; then
+                    echo "$tries_path" | tr ',' '\n'
+                else
+                    echo "$tries_path"
+                fi
                 return
             fi
         fi
@@ -233,20 +266,17 @@ _try_rs_get_tries_path() {
 }
 
 _try_rs_complete() {
-    local tries_path=$(_try_rs_get_tries_path)
     local -a dirs=()
-    local dir
-    
-    if [[ -d "$tries_path" ]]; then
-        # Get list of directories
-        while IFS= read -r dir; do
-            if [[ -d "$tries_path/$dir" ]]; then
-                dirs+=("$dir")
-            fi
-        done < <(command ls -1 "$tries_path" 2>/dev/null)
-    fi
-    
-    compadd -- "${dirs[@]}"
+    local tries_path
+
+    while IFS= read -r tries_path; do
+        if [[ -d "$tries_path" ]]; then
+            local -a entries=("$tries_path"/*(N-/))
+            dirs+=("${entries[@]:t}")
+        fi
+    done < <(_try_rs_get_tries_path)
+
+    compadd -a dirs
 }
 
 compdef _try_rs_complete try-rs
@@ -257,7 +287,11 @@ compdef _try_rs_complete try-rs
 _try_rs_get_tries_path() {
     # Check TRY_PATH environment variable first
     if [[ -n "${TRY_PATH}" ]]; then
-        echo "${TRY_PATH}"
+        if [[ "${TRY_PATH}" == *","* ]]; then
+            echo "${TRY_PATH}" | tr ',' '\n'
+        else
+            echo "${TRY_PATH}"
+        fi
         return
     fi
     
@@ -265,9 +299,14 @@ _try_rs_get_tries_path() {
     local config_paths=("$HOME/.config/try-rs/config.toml" "$HOME/.try-rs/config.toml")
     for config_path in "${config_paths[@]}"; do
         if [[ -f "$config_path" ]]; then
-            local tries_path=$(grep -E '^[[:space:]]*tries_path[[:space:]]*=' "$config_path" 2>/dev/null | sed 's/.*=[[:space:]]*"\?\([^"]*\)"\?.*/\1/' | sed "s|~|$HOME|" | tr -d '[:space:]')
+            # Try tries_path (supports single or multiple paths with comma)
+            local tries_path=$(grep -E '^[[:space:]]*tries_path[[:space:]]*=' "$config_path" 2>/dev/null | sed -E 's/.*=[[:space:]]*"?([^"]*)"?.*/\1/' | sed "s|~|$HOME|" | tr -d '[:space:]')
             if [[ -n "$tries_path" ]]; then
-                echo "$tries_path"
+                if [[ "$tries_path" == *","* ]]; then
+                    echo "$tries_path" | tr ',' '\n'
+                else
+                    echo "$tries_path"
+                fi
                 return
             fi
         fi
@@ -279,17 +318,25 @@ _try_rs_get_tries_path() {
 
 _try_rs_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local tries_path=$(_try_rs_get_tries_path)
+    local tries_paths=$(_try_rs_get_tries_path)
     local dirs=""
     
-    if [[ -d "$tries_path" ]]; then
-        # Get list of directories
-        while IFS= read -r dir; do
-            if [[ -d "$tries_path/$dir" ]]; then
-                dirs="$dirs $dir"
-            fi
-        done < <(ls -1 "$tries_path" 2>/dev/null)
-    fi
+    # Split by comma if multiple paths
+    IFS=',' read -ra PATH_ARRAY <<< "$tries_paths"
+    
+    for tries_path in "${PATH_ARRAY[@]}"; do
+        # Trim whitespace
+        tries_path=$(echo "$tries_path" | xargs)
+        
+        if [[ -d "$tries_path" ]]; then
+            # Get list of directories
+            while IFS= read -r dir; do
+                if [[ -d "$tries_path/$dir" ]]; then
+                    dirs="$dirs $dir"
+                fi
+            done < <(ls -1 "$tries_path" 2>/dev/null)
+        fi
+    done
     
     COMPREPLY=($(compgen -W "$dirs" -- "$cur"))
 }
@@ -303,8 +350,8 @@ Register-ArgumentCompleter -CommandName try-rs -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     
     # Get tries path from environment variable or default
-    $triesPath = $env:TRY_PATH
-    if (-not $triesPath) {
+    $triesPaths = $env:TRY_PATH
+    if (-not $triesPaths) {
         # Try to read from config file
         $configPaths = @(
             "$env:USERPROFILE/.config/try-rs/config.toml",
@@ -313,8 +360,9 @@ Register-ArgumentCompleter -CommandName try-rs -ScriptBlock {
         foreach ($configPath in $configPaths) {
             if (Test-Path $configPath) {
                 $content = Get-Content $configPath -Raw
+                # Try tries_path (supports single or multiple paths with comma)
                 if ($content -match 'tries_path\s*=\s*["'']?([^"'']+)["'']?') {
-                    $triesPath = $matches[1].Replace('~', $env:USERPROFILE).Trim()
+                    $triesPaths = $matches[1].Replace('~', $env:USERPROFILE).Trim()
                     break
                 }
             }
@@ -322,22 +370,28 @@ Register-ArgumentCompleter -CommandName try-rs -ScriptBlock {
     }
     
     # Default path
-    if (-not $triesPath) {
-        $triesPath = "$env:USERPROFILE/work/tries"
+    if (-not $triesPaths) {
+        $triesPaths = "$env:USERPROFILE/work/tries"
     }
     
-    # Get directories
-    if (Test-Path $triesPath) {
-        Get-ChildItem -Path $triesPath -Directory | 
-            Where-Object { $_.Name -like "$wordToComplete*" } |
-            ForEach-Object { 
-                [System.Management.Automation.CompletionResult]::new(
-                    $_.Name, 
-                    $_.Name, 
-                    'ParameterValue', 
-                    $_.Name
-                )
-            }
+    # Split by comma if multiple paths
+    $pathArray = $triesPaths -split ','
+    
+    # Get directories from all paths
+    foreach ($triesPath in $pathArray) {
+        $triesPath = $triesPath.Trim()
+        if (Test-Path $triesPath) {
+            Get-ChildItem -Path $triesPath -Directory | 
+                Where-Object { $_.Name -like "$wordToComplete*" } |
+                ForEach-Object { 
+                    [System.Management.Automation.CompletionResult]::new(
+                        $_.Name, 
+                        $_.Name, 
+                        'ParameterValue', 
+                        $_.Name
+                    )
+                }
+        }
     }
 }
 "#.to_string()
@@ -346,10 +400,10 @@ Register-ArgumentCompleter -CommandName try-rs -ScriptBlock {
             r#"# try-rs tab completion for directory names
 # Add this to your Nushell config or env file
 
-export def __try_rs_get_tries_path [] {
+export def __try_rs_get_tries_paths [] {
     # Check TRY_PATH environment variable first
     if ($env.TRY_PATH? | is-not-empty) {
-        return $env.TRY_PATH
+        return ($env.TRY_PATH | split row "," | each { |s| $s | str trim })
     }
     
     # Try to read from config file
@@ -361,39 +415,37 @@ export def __try_rs_get_tries_path [] {
     for config_path in $config_paths {
         if ($config_path | path exists) {
             let content = (open $config_path | str trim)
+            # Try tries_path (supports single or multiple paths with comma)
             if ($content =~ 'tries_path\\s*=\\s*"?([^"]+)"?') {
                 let path = ($content | parse -r 'tries_path\\s*=\\s*"?([^"]+)"?' | get capture0.0? | default "")
                 if ($path | is-not-empty) {
-                    return ($path | str replace "~" $env.HOME)
+                    # Check if contains comma (multiple paths)
+                    if ($path | str contains ",") {
+                        return ($path | split row "," | each { |s| ($s | str trim | str replace "~" $env.HOME) })
+                    else
+                        return ([($path | str replace "~" $env.HOME)])
+                    }
                 }
             }
         }
     }
     
     # Default path
-    ($env.HOME | path join "work" "tries")
+    [($env.HOME | path join "work" "tries")]
 }
 
 export def __try_rs_complete [context: string] {
-    let tries_path = (__try_rs_get_tries_path)
+    let tries_paths = (__try_rs_get_tries_paths)
     
-    if ($tries_path | path exists) {
-        ls $tries_path | where type == "dir" | get name | path basename
-    } else {
-        []
+    mut all_dirs = []
+    for tries_path in $tries_paths {
+        if ($tries_path | path exists) {
+            let dirs = (ls $tries_path | where type == "dir" | get name | path basename)
+            $all_dirs = ($all_dirs | append $dirs)
+        }
     }
+    $all_dirs
 }
-
-# Add completion to the try-rs command
-export extern try-rs [
-    name_or_url?: string@__try_rs_complete
-    destination?: string
-    --setup: string
-    --setup-stdout: string
-    --completions: string
-    --shallow-clone(-s)
-    --worktree(-w): string
-]
 "#.to_string()
         }
     }
@@ -466,8 +518,7 @@ pub fn get_shell_integration_path(shell: &Shell) -> PathBuf {
     };
 
     match shell {
-        Shell::Fish => get_fish_functions_dir()
-            .join("try-rs.fish"),
+        Shell::Fish => get_fish_functions_dir().join("try-rs.fish"),
         Shell::Zsh => config_dir.join("try-rs.zsh"),
         Shell::Bash => config_dir.join("try-rs.bash"),
         Shell::PowerShell => config_dir.join("try-rs.ps1"),
@@ -492,8 +543,7 @@ fn get_fish_functions_dir() -> PathBuf {
 }
 
 fn write_fish_picker_function() -> Result<PathBuf> {
-    let file_path = get_fish_functions_dir()
-        .join("try-rs-picker.fish");
+    let file_path = get_fish_functions_dir().join("try-rs-picker.fish");
     if let Some(parent) = file_path.parent()
         && !parent.exists()
     {
@@ -515,7 +565,8 @@ pub fn is_shell_integration_configured(shell: &Shell) -> bool {
 fn append_source_to_rc(rc_path: &std::path::Path, source_cmd: &str) -> Result<()> {
     if rc_path.exists() {
         let content = fs::read_to_string(rc_path)?;
-        if !content.contains(source_cmd) {
+        // Check for either the exact source command or our marker comment
+        if !content.contains(source_cmd) && !content.contains("# try-rs integration") {
             let mut file = fs::OpenOptions::new().append(true).open(rc_path)?;
             writeln!(file, "\n# try-rs integration")?;
             writeln!(file, "{}", source_cmd)?;
@@ -650,7 +701,13 @@ pub fn generate_completions(shell: &Shell) -> Result<()> {
 
 pub fn get_installed_shells() -> Vec<Shell> {
     let mut shells = Vec::new();
-    for shell in [Shell::Fish, Shell::Zsh, Shell::Bash, Shell::PowerShell, Shell::NuShell] {
+    for shell in [
+        Shell::Fish,
+        Shell::Zsh,
+        Shell::Bash,
+        Shell::PowerShell,
+        Shell::NuShell,
+    ] {
         if is_shell_installed(&shell) {
             shells.push(shell);
         }
@@ -675,7 +732,9 @@ fn is_shell_installed(shell: &Shell) -> bool {
         Ok(out) => {
             let result = String::from_utf8_lossy(&out.stdout);
             let trimmed = result.trim();
-            !trimmed.is_empty() && !trimmed.ends_with(':') && trimmed.starts_with(&format!("{}: ", shell_name))
+            !trimmed.is_empty()
+                && !trimmed.ends_with(':')
+                && trimmed.starts_with(&format!("{}: ", shell_name))
         }
         Err(_) => false,
     }
@@ -683,18 +742,19 @@ fn is_shell_installed(shell: &Shell) -> bool {
 
 pub fn clear_shell_setup() -> Result<()> {
     let installed_shells = get_installed_shells();
-    
+
     if installed_shells.is_empty() {
         eprintln!("No supported shells found on this system.");
         return Ok(());
     }
 
     eprintln!("Detected shells: {:?}\n", installed_shells);
+    
     eprintln!("Files to be removed:");
 
     for shell in &installed_shells {
         let paths = get_shell_config_paths(shell);
-        
+
         for path in &paths {
             eprintln!("  - {}", path.display());
         }
@@ -702,7 +762,10 @@ pub fn clear_shell_setup() -> Result<()> {
         match shell {
             Shell::Fish => {
                 let fish_functions = get_fish_functions_dir();
-                eprintln!("  - {}", fish_functions.join("try-rs-picker.fish").display());
+                eprintln!(
+                    "  - {}",
+                    fish_functions.join("try-rs-picker.fish").display()
+                );
             }
             _ => {}
         }
@@ -719,34 +782,80 @@ pub fn clear_shell_setup() -> Result<()> {
 }
 
 fn clear_shell_config(shell: &Shell) -> Result<()> {
-    let paths = get_shell_config_paths(shell);
-    
-    for path in &paths {
-        if path.exists() {
-            fs::remove_file(path)?;
-            eprintln!("Removed: {}", path.display());
+    let integration_file = get_shell_integration_path(shell);
+    if integration_file.exists() {
+        fs::remove_file(&integration_file)?;
+        eprintln!("Removed integration file: {}", integration_file.display());
+    }
+
+    if let Shell::Fish = shell {
+        let picker_path = get_fish_functions_dir().join("try-rs-picker.fish");
+        if picker_path.exists() {
+            fs::remove_file(&picker_path)?;
+            eprintln!("Removed picker file: {}", picker_path.display());
         }
     }
 
-    match shell {
-        Shell::Fish => {
-            let fish_functions = get_fish_functions_dir();
-            let picker_path = fish_functions.join("try-rs-picker.fish");
-            if picker_path.exists() {
-                fs::remove_file(&picker_path)?;
-                eprintln!("Removed: {}", picker_path.display());
+    // Clean up RC files instead of deleting them
+    let home_dir = dirs::home_dir().expect("Could not find home directory");
+    let rc_files = match shell {
+        Shell::Zsh => vec![home_dir.join(".zshrc")],
+        Shell::Bash => vec![home_dir.join(".bashrc")],
+        Shell::NuShell => vec![dirs::config_dir()
+            .expect("Could not find config directory")
+            .join("nushell")
+            .join("config.nu")],
+        Shell::PowerShell => {
+             let profile_path_ps7 = home_dir
+                .join("Documents")
+                .join("PowerShell")
+                .join("Microsoft.PowerShell_profile.ps1");
+            let profile_path_ps5 = home_dir
+                .join("Documents")
+                .join("WindowsPowerShell")
+                .join("Microsoft.PowerShell_profile.ps1");
+            vec![profile_path_ps7, profile_path_ps5]
+        },
+        _ => vec![],
+    };
+
+    for rc_path in rc_files {
+        if rc_path.exists() {
+            remove_source_from_rc(&rc_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_source_from_rc(rc_path: &std::path::Path) -> Result<()> {
+    let content = fs::read_to_string(rc_path)?;
+    if content.contains("try-rs") {
+        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let initial_count = lines.len();
+        
+        // Remove lines containing try-rs integration marker or typical source commands
+        lines.retain(|line| {
+            !line.contains("# try-rs integration") && 
+            !(line.contains("source") && line.contains("try-rs")) &&
+            !(line.contains(".") && line.contains("try-rs") && rc_path.extension().map_or(false, |ext| ext == "ps1"))
+        });
+
+        if lines.len() < initial_count {
+            let mut new_content = lines.join("\n");
+            if !new_content.is_empty() && !new_content.ends_with('\n') {
+                new_content.push('\n');
             }
+            fs::write(rc_path, new_content)?;
+            eprintln!("Cleaned up integration lines from {}", rc_path.display());
         }
-        _ => {}
     }
-
     Ok(())
 }
 
 fn get_shell_config_paths(shell: &Shell) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let config_dir = get_base_config_dir();
-    let home_dir = dirs::home_dir().expect("Could not find home directory");
 
     match shell {
         Shell::Fish => {
@@ -755,23 +864,9 @@ fn get_shell_config_paths(shell: &Shell) -> Vec<PathBuf> {
         }
         Shell::Zsh => {
             paths.push(config_dir.join("try-rs.zsh"));
-            if home_dir.join(".zshrc").exists() {
-                if let Ok(content) = fs::read_to_string(home_dir.join(".zshrc")) {
-                    if content.contains("try-rs") {
-                        paths.push(home_dir.join(".zshrc"));
-                    }
-                }
-            }
         }
         Shell::Bash => {
             paths.push(config_dir.join("try-rs.bash"));
-            if home_dir.join(".bashrc").exists() {
-                if let Ok(content) = fs::read_to_string(home_dir.join(".bashrc")) {
-                    if content.contains("try-rs") {
-                        paths.push(home_dir.join(".bashrc"));
-                    }
-                }
-            }
         }
         Shell::PowerShell => {
             paths.push(config_dir.join("try-rs.ps1"));

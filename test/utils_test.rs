@@ -102,7 +102,7 @@ fn extract_prefix_date_wrong_format() {
 
 #[test]
 fn generate_prefix_date_format() {
-    let date = generate_prefix_date();
+    let date = generate_prefix_date(None);
     assert_eq!(date.len(), 10);
     assert_eq!(&date[4..5], "-");
     assert_eq!(&date[7..8], "-");
@@ -110,7 +110,7 @@ fn generate_prefix_date_format() {
 
 #[test]
 fn generate_prefix_date_matches_today() {
-    let date = generate_prefix_date();
+    let date = generate_prefix_date(None);
     let today = Local::now().format("%Y-%m-%d").to_string();
     assert_eq!(date, today);
 }
@@ -149,9 +149,9 @@ fn matching_folders_exact_and_dated() {
     std::fs::create_dir(base.join("bar")).unwrap();
 
     let matches = matching_folders("foo", &base.to_path_buf());
-    assert!(matches.contains(&"foo".to_string()));
-    assert!(matches.contains(&"2024-01-15 foo".to_string()));
-    assert!(!matches.contains(&"bar".to_string()));
+    assert!(matches.iter().any(|m| m.1 == "foo"));
+    assert!(matches.iter().any(|m| m.1 == "2024-01-15 foo"));
+    assert!(!matches.iter().any(|m| m.1 == "bar"));
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn matching_folders_multiple_dated() {
     std::fs::create_dir(tmp.path().join("other")).unwrap();
     let matches = matching_folders("proj", &tmp.path().to_path_buf());
     assert_eq!(matches.len(), 2);
-    assert!(matches.iter().all(|m| m.contains("proj")));
+    assert!(matches.iter().all(|m| m.1.contains("proj")));
 }
 
 #[test]
@@ -468,8 +468,8 @@ fn selection_result_variants() {
 
 #[test]
 fn generate_prefix_date_consistency() {
-    let date1 = generate_prefix_date();
-    let date2 = generate_prefix_date();
+    let date1 = generate_prefix_date(None);
+    let date2 = generate_prefix_date(None);
     // Same call should produce same result
     assert_eq!(date1, date2);
 

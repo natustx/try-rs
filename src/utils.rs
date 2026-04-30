@@ -138,9 +138,10 @@ pub fn extract_prefix_date(name: &str) -> Option<(SystemTime, String)> {
     Some((dt_local.into(), rhs.into()))
 }
 
-pub fn generate_prefix_date() -> String {
+pub fn generate_prefix_date(format: Option<&str>) -> String {
     let now = Local::now();
-    now.format("%Y-%m-%d").to_string()
+    let fmt = format.unwrap_or(DATE_PREFIX_FORMAT);
+    now.format(fmt).to_string()
 }
 
 pub fn get_folder_size_mb(path: &Path) -> u64 {
@@ -169,7 +170,7 @@ pub fn get_folder_size_mb(path: &Path) -> u64 {
     dir_size(path) / (1024 * 1024)
 }
 
-pub fn matching_folders(name: &str, path: &PathBuf) -> Vec<String> {
+pub fn matching_folders(name: &str, path: &PathBuf) -> Vec<(PathBuf, String)> {
     let mut result = vec![];
     if let Ok(read_dir) = fs::read_dir(&path) {
         for entry in read_dir.flatten() {
@@ -178,11 +179,11 @@ pub fn matching_folders(name: &str, path: &PathBuf) -> Vec<String> {
             {
                 let filename = entry.file_name().to_string_lossy().to_string();
                 if filename == name {
-                    result.push(filename);
+                    result.push((path.clone(), filename));
                 } else if let Some((_, stripped_name)) = extract_prefix_date(&filename)
                     && name == stripped_name
                 {
-                    result.push(filename);
+                    result.push((path.clone(), filename));
                 }
             }
         }

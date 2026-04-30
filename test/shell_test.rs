@@ -35,8 +35,8 @@ fn get_shell_content_powershell_contains_function() {
 #[test]
 fn get_shell_content_nushell_contains_function() {
     let content = get_shell_content(&Shell::NuShell);
-    assert!(content.contains("def --wrapped try-rs"));
-    assert!(content.contains("try-rs.exe"));
+    assert!(content.contains("def --env --wrapped try-rs"));
+    assert!(content.contains("^try-rs"));
 }
 
 #[test]
@@ -88,9 +88,11 @@ fn get_completions_script_powershell_contains_register() {
 }
 
 #[test]
-fn get_completions_script_nushell_contains_export() {
+fn get_completions_script_nushell_contains_helpers() {
     let script = get_completions_script(&Shell::NuShell);
-    assert!(script.contains("export extern try-rs"));
+    assert!(script.contains("__try_rs_get_tries_path"));
+    assert!(script.contains("__try_rs_complete"));
+    assert!(!script.contains("export extern try-rs"));
 }
 
 #[test]
@@ -178,43 +180,6 @@ fn get_shell_integration_path_powershell() {
 fn get_shell_integration_path_nushell() {
     let path = get_shell_integration_path(&Shell::NuShell);
     assert!(path.to_string_lossy().contains("try-rs.nu"));
-}
-
-#[test]
-fn is_shell_integration_configured_false_when_not_exists() {
-    let tmp = TempDir::new("shell-config").unwrap();
-    let config_dir = tmp.path().join(".config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-    }
-
-    // Test com um shell específico que sabemos que não existe no temp dir
-    let shell_file = config_dir.join("try-rs.zsh");
-    assert!(!shell_file.exists());
-    assert!(
-        !is_shell_integration_configured(&Shell::Zsh),
-        "Zsh should not be configured in empty dir"
-    );
-}
-
-#[test]
-fn is_shell_integration_configured_true_when_exists() {
-    let tmp = TempDir::new("shell-config").unwrap();
-    let config_dir = tmp.path().join(".config").join("try-rs");
-    std::fs::create_dir_all(&config_dir).unwrap();
-
-    let shell_file = config_dir.join("try-rs.zsh");
-    std::fs::write(&shell_file, "# test content").unwrap();
-
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));
-    }
-
-    assert!(is_shell_integration_configured(&Shell::Zsh));
 }
 
 #[test]

@@ -10,10 +10,11 @@ use crossterm::{
     },
 };
 use ratatui::{TerminalOptions, Viewport, prelude::*};
-use std::process::Stdio;
 use std::{
     fs,
     io::{self, IsTerminal, Write},
+    path::PathBuf,
+    process::Stdio,
 };
 
 mod cli;
@@ -25,7 +26,7 @@ mod utils;
 
 use cli::{Cli, Shell};
 use config::{AppConfig, load_configuration};
-use shell::{generate_completions, get_shell_content, setup_shell, clear_shell_setup};
+use shell::{clear_shell_setup, generate_completions, get_shell_content, setup_shell};
 use tui::{App, run_app};
 
 use crate::utils::{SelectionResult, generate_prefix_date};
@@ -119,6 +120,7 @@ fn handle_worktree(
     branch_name: &str,
     tries_dir: &std::path::Path,
     apply_date_prefix: Option<bool>,
+    date_prefix_format: Option<&str>,
 ) -> Result<()> {
     if !utils::is_inside_git_repo(".") {
         eprintln!("Error: Not inside a git repository.");
@@ -128,7 +130,7 @@ fn handle_worktree(
 
     let mut folder_name = branch_name.to_string();
     if Some(true) == apply_date_prefix {
-        folder_name = format!("{} {}", generate_prefix_date(), folder_name);
+        folder_name = format!("{} {}", generate_prefix_date(date_prefix_format), folder_name);
     }
 
     let new_path = tries_dir.join(&folder_name);
@@ -226,13 +228,14 @@ fn handle_clone(
     shallow: bool,
     tries_dir: &std::path::Path,
     apply_date_prefix: Option<bool>,
+    date_prefix_format: Option<&str>,
     open_editor: bool,
     editor_cmd: &Option<String>,
 ) -> Result<()> {
     let repo_name = utils::extract_repo_name(url);
     let mut folder_name = destination.unwrap_or(repo_name);
     if Some(true) == apply_date_prefix {
-        folder_name = format!("{} {}", generate_prefix_date(), folder_name);
+        folder_name = format!("{} {}", generate_prefix_date(date_prefix_format), folder_name);
     }
 
     let new_path = tries_dir.join(&folder_name);
@@ -266,11 +269,12 @@ fn handle_new_folder(
     name: &str,
     tries_dir: &std::path::Path,
     apply_date_prefix: Option<bool>,
+    date_prefix_format: Option<&str>,
     open_editor: bool,
     editor_cmd: &Option<String>,
 ) -> Result<()> {
     let mut new_name = name.to_string();
-    let date_prefix = generate_prefix_date();
+    let date_prefix = generate_prefix_date(date_prefix_format);
     if Some(true) == apply_date_prefix && !new_name.starts_with(&date_prefix) {
         new_name = format!("{date_prefix} {new_name}");
     }
@@ -291,11 +295,13 @@ fn main() -> Result<()> {
         }
     };
     let AppConfig {
-        tries_dir,
+        tries_dirs,
+        active_tab,
         theme,
         editor_cmd,
         config_path,
         apply_date_prefix,
+        date_prefix_format,
         transparent_background,
         show_disk,
         show_preview,
@@ -317,12 +323,11 @@ fn main() -> Result<()> {
     let show_disk = resolve_visibility(cli.show_disk, cli.hide_disk, show_disk);
     let show_preview = resolve_visibility(cli.show_preview, cli.hide_preview, show_preview);
     let show_legend = resolve_visibility(cli.show_legend, cli.hide_legend, show_legend);
-    let show_right_panel = resolve_visibility(
-        cli.show_right_panel,
-        cli.hide_right_panel,
-        show_right_panel,
-    );
+    let show_right_panel =
+        resolve_visibility(cli.show_right_panel, cli.hide_right_panel, show_right_panel);
     let right_panel_width = right_panel_width.unwrap_or(25).clamp(10, 90);
+
+    let tries_dir = tries_dirs[active_tab].clone();
 
     if !tries_dir.exists() {
         fs::create_dir_all(&tries_dir)?;
@@ -349,7 +354,7 @@ fn main() -> Result<()> {
     }
 
     if let Some(ref worktree_branch_name) = cli.worktree {
-        handle_worktree(worktree_branch_name, &tries_dir, apply_date_prefix)?;
+        handle_worktree(worktree_branch_name, &tries_dir, apply_date_prefix, date_prefix_format.as_deref())?;
         return Ok(());
     }
 
@@ -359,6 +364,7 @@ fn main() -> Result<()> {
 
     let selection_result: SelectionResult;
     let mut open_editor = false;
+    let mut selected_dir = tries_dirs[active_tab].clone();
 
     let (matching_folders, query) = match &cli.name_or_url {
         Some(name) => {
@@ -369,12 +375,18 @@ fn main() -> Result<()> {
                 name
             };
 
+            let mut all_matches: Vec<(PathBuf, String)> = Vec::new();
+            for dir in &tries_dirs {
+                let matches = utils::matching_folders(folder_name, dir);
+                all_matches.extend(matches);
+            }
+
             (
-                utils::matching_folders(folder_name, &tries_dir),
+                all_matches,
                 Some(folder_name.to_string()),
             )
         }
-        None => (vec![], None),
+        None => (Vec::<(PathBuf, String)>::new(), None),
     };
 
     if let Some(name) = &cli.name_or_url
@@ -383,95 +395,111 @@ fn main() -> Result<()> {
         if matching_folders.is_empty() {
             selection_result = SelectionResult::New(name.clone());
         } else {
-            selection_result = SelectionResult::Folder(
-                matching_folders
-                    .into_iter()
-                    .next()
-                    .expect("must have exactly 1 items here"),
-            );
+            let (matched_dir, folder_name) = matching_folders
+                .into_iter()
+                .next()
+                .expect("must have exactly 1 items here");
+            selected_dir = matched_dir;
+            selection_result = SelectionResult::Folder(folder_name);
         }
     } else {
-        const DEFAULT_INLINE_PICKER_HEIGHT: u16 = 18;
-        const MIN_INLINE_PICKER_HEIGHT: u16 = 8;
-
-        if cli.inline_picker && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
-            bail!("--inline-picker requires an interactive terminal session");
-        }
-
-        enable_raw_mode()?;
-        let mut stderr = io::stderr();
-        let mut inline_picker_area = None;
-
-        if !cli.inline_picker {
-            execute!(stderr, EnterAlternateScreen)?;
-        }
-
-        let backend = CrosstermBackend::new(stderr);
-        let mut terminal = if cli.inline_picker {
-            let inline_height = cli
-                .inline_height
-                .unwrap_or(DEFAULT_INLINE_PICKER_HEIGHT)
-                .max(MIN_INLINE_PICKER_HEIGHT);
-
-            let mut backend = backend;
-            let picker_area =
-                compute_inline_picker_area(&mut backend, inline_height).map_err(|err| {
-                    anyhow!("--inline-picker requires an interactive terminal session ({err})")
-                })?;
-            inline_picker_area = Some(picker_area);
-
-            Terminal::with_options(
-                backend,
-                TerminalOptions {
-                    viewport: Viewport::Fixed(picker_area),
-                },
-            )?
+        let has_multiple_tabs = tries_dirs.len() > 1;
+        
+        if !has_multiple_tabs && matching_folders.len() > 1 {
+            selection_result = matching_folders
+                .into_iter()
+                .next()
+                .map(|(_, n)| SelectionResult::Folder(n))
+                .unwrap_or(SelectionResult::None);
         } else {
-            Terminal::new(backend)?
-        };
+            const DEFAULT_INLINE_PICKER_HEIGHT: u16 = 18;
+            const MIN_INLINE_PICKER_HEIGHT: u16 = 8;
 
-        let mut app = App::new(
-            tries_dir.clone(),
-            theme,
-            editor_cmd.clone(),
-            config_path.clone(),
-            apply_date_prefix,
-            transparent_background.unwrap_or(true),
-            query,
-        );
-        app.show_disk = show_disk;
-        app.show_preview = show_preview;
-        app.show_legend = show_legend;
-        app.right_panel_visible = show_right_panel;
-        app.right_panel_width = right_panel_width;
-        let res = run_app(&mut terminal, app);
-
-        disable_raw_mode()?;
-        if cli.inline_picker {
-            if let Some(area) = inline_picker_area {
-                let end_y = area.y.saturating_add(area.height);
-                for row in area.y..end_y {
-                    execute!(
-                        terminal.backend_mut(),
-                        MoveTo(0, row),
-                        Clear(ClearType::CurrentLine)
-                    )?;
-                }
-                execute!(terminal.backend_mut(), MoveTo(0, area.y))?;
-            } else {
-                terminal.clear()?;
+            if cli.inline_picker && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
+                bail!("--inline_picker requires an interactive terminal session");
             }
-        } else {
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-        }
-        terminal.show_cursor()?;
 
-        (selection_result, open_editor) = res?;
+            enable_raw_mode()?;
+            let mut stderr = io::stderr();
+            let mut inline_picker_area = None;
+
+            if !cli.inline_picker {
+                execute!(stderr, EnterAlternateScreen)?;
+            }
+
+            let backend = CrosstermBackend::new(stderr);
+            let mut terminal = if cli.inline_picker {
+                let inline_height = cli
+                    .inline_height
+                    .unwrap_or(DEFAULT_INLINE_PICKER_HEIGHT)
+                    .max(MIN_INLINE_PICKER_HEIGHT);
+
+                let mut backend = backend;
+                let picker_area =
+                    compute_inline_picker_area(&mut backend, inline_height).map_err(|err| {
+                        anyhow!("--inline_picker requires an interactive terminal session ({err})")
+                    })?;
+                inline_picker_area = Some(picker_area);
+
+                Terminal::with_options(
+                    backend,
+                    TerminalOptions {
+                        viewport: Viewport::Fixed(picker_area),
+                    },
+                )?
+            } else {
+                Terminal::new(backend)?
+            };
+
+            let mut app = App::new(
+                tries_dir.clone(),
+                theme,
+                editor_cmd.clone(),
+                config_path.clone(),
+                apply_date_prefix,
+                date_prefix_format.clone(),
+                transparent_background.unwrap_or(true),
+                query,
+                tries_dirs.clone(),
+                active_tab,
+                show_disk,
+            );
+            app.show_preview = show_preview;
+            app.show_legend = show_legend;
+            app.right_panel_visible = show_right_panel;
+            app.right_panel_width = right_panel_width;
+            let res = run_app(&mut terminal, app);
+
+            disable_raw_mode()?;
+            if cli.inline_picker {
+                if let Some(area) = inline_picker_area {
+                    let end_y = area.y.saturating_add(area.height);
+                    for row in area.y..end_y {
+                        execute!(
+                            terminal.backend_mut(),
+                            MoveTo(0, row),
+                            Clear(ClearType::CurrentLine)
+                        )?;
+                    }
+                    execute!(terminal.backend_mut(), MoveTo(0, area.y))?;
+                } else {
+                    terminal.clear()?;
+                }
+            } else {
+                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            }
+            terminal.show_cursor()?;
+
+            let (result_selection, result_editor, result_tab) = res?;
+            selection_result = result_selection;
+            open_editor = result_editor;
+            selected_dir = tries_dirs[result_tab].clone();
+        }
     }
 
     match selection_result {
         SelectionResult::Folder(selection) => {
-            let target_path = tries_dir.join(&selection);
+            let target_path = selected_dir.join(&selection);
             print_cd_or_editor(&target_path, open_editor, &editor_cmd);
         }
         SelectionResult::New(selection) => {
@@ -480,16 +508,18 @@ fn main() -> Result<()> {
                     &selection,
                     cli.destination.clone(),
                     cli.shallow_clone,
-                    &tries_dir,
+                    &selected_dir,
                     apply_date_prefix,
+                    date_prefix_format.as_deref(),
                     open_editor,
                     &editor_cmd,
                 )?;
             } else {
                 handle_new_folder(
                     &selection,
-                    &tries_dir,
+                    &selected_dir,
                     apply_date_prefix,
+                    date_prefix_format.as_deref(),
                     open_editor,
                     &editor_cmd,
                 )?;

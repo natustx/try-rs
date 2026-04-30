@@ -10,6 +10,7 @@ use std::{
     fs,
     io::{self},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -28,10 +29,12 @@ use crate::{
 pub enum AppMode {
     Normal,
     DeleteConfirm,
+    RenamePrompt,
     ThemeSelect,
     ConfigSavePrompt,
     ConfigSaveLocationSelect,
     About,
+    MoveFolder,
 }
 
 #[derive(Clone)]
@@ -69,6 +72,7 @@ pub struct App {
     pub editor_cmd: Option<String>,
     pub wants_editor: bool,
     pub apply_date_prefix: Option<bool>,
+    pub date_prefix_format: Option<String>,
     pub transparent_background: bool,
     pub show_new_option: bool,
     pub show_disk: bool,
@@ -76,6 +80,9 @@ pub struct App {
     pub show_legend: bool,
     pub right_panel_visible: bool,
     pub right_panel_width: u16,
+
+    pub tries_dirs: Vec<PathBuf>,
+    pub active_tab: usize,
 
     pub available_themes: Vec<Theme>,
     pub theme_list_state: ListState,
@@ -87,6 +94,9 @@ pub struct App {
 
     pub cached_free_space_mb: Option<u64>,
     pub folder_size_mb: Arc<AtomicU64>,
+
+    pub rename_input: String,
+    pub move_folder_state: ListState,
 
     current_entries: HashSet<String>,
     matcher: SkimMatcherV2,
@@ -127,8 +137,12 @@ impl App {
         editor_cmd: Option<String>,
         config_path: Option<PathBuf>,
         apply_date_prefix: Option<bool>,
+        date_prefix_format: Option<String>,
         transparent_background: bool,
         query: Option<String>,
+        tries_dirs: Vec<PathBuf>,
+        active_tab: usize,
+        show_disk: bool,
     ) -> Self {
         let mut entries = Vec::new();
         let mut current_entries = HashSet::new();
@@ -234,35 +248,126 @@ impl App {
             editor_cmd,
             wants_editor: false,
             apply_date_prefix,
+            date_prefix_format,
             transparent_background,
             show_new_option: false,
-            show_disk: true,
+            show_disk,
             show_preview: true,
             show_legend: true,
             right_panel_visible: true,
             right_panel_width: 25,
+            tries_dirs: tries_dirs.clone(),
+            active_tab,
             available_themes: themes,
             theme_list_state: theme_state,
             original_theme: None,
             original_transparent_background: None,
             config_path,
             config_location_state: ListState::default(),
-            cached_free_space_mb: utils::get_free_disk_space_mb(&path),
+            cached_free_space_mb: if show_disk { utils::get_free_disk_space_mb(&path) } else { None },
             folder_size_mb: Arc::new(AtomicU64::new(0)),
+            rename_input: String::new(),
+            move_folder_state: ListState::default(),
             current_entries,
             matcher: SkimMatcherV2::default(),
         };
 
-        // Spawn background thread to calculate folder size
-        let folder_size_arc = Arc::clone(&app.folder_size_mb);
-        let path_clone = path.clone();
-        thread::spawn(move || {
-            let size = utils::get_folder_size_mb(&path_clone);
-            folder_size_arc.store(size, Ordering::Relaxed);
-        });
+        // Spawn background thread to calculate folder size (only if disk panel is visible)
+        if show_disk {
+            let folder_size_arc = Arc::clone(&app.folder_size_mb);
+            let path_clone = path.clone();
+            thread::spawn(move || {
+                let size = utils::get_folder_size_mb(&path_clone);
+                folder_size_arc.store(size, Ordering::Relaxed);
+            });
+        }
 
         app.update_search();
         app
+    }
+
+    pub fn switch_tab(&mut self, new_tab: usize) {
+        if new_tab >= self.tries_dirs.len() {
+            return;
+        }
+        self.active_tab = new_tab;
+        self.base_path = self.tries_dirs[new_tab].clone();
+        self.folder_size_mb = Arc::new(AtomicU64::new(0));
+
+        if self.show_disk {
+            self.cached_free_space_mb = utils::get_free_disk_space_mb(&self.base_path);
+            let path_clone = self.base_path.clone();
+            let folder_size_arc = Arc::clone(&self.folder_size_mb);
+            thread::spawn(move || {
+                let size = utils::get_folder_size_mb(&path_clone);
+                folder_size_arc.store(size, Ordering::Relaxed);
+            });
+        }
+
+        self.query.clear();
+        self.load_entries();
+        self.update_search();
+    }
+
+    fn load_entries(&mut self) {
+        self.all_entries.clear();
+
+        if let Ok(read_dir) = fs::read_dir(&self.base_path) {
+            for entry in read_dir.flatten() {
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_dir()
+                {
+                    let entry_path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let git_path = entry_path.join(".git");
+                    let is_git = git_path.exists();
+                    let is_worktree = git_path.is_file();
+                    let is_worktree_locked = utils::is_git_worktree_locked(&entry_path);
+                    let is_gitmodules = entry_path.join(".gitmodules").exists();
+                    let is_mise = entry_path.join("mise.toml").exists();
+                    let is_cargo = entry_path.join("Cargo.toml").exists();
+                    let is_maven = entry_path.join("pom.xml").exists();
+
+                    let created;
+                    let display_name;
+                    if let Some((date_prefix, remainder)) = utils::extract_prefix_date(&name) {
+                        created = date_prefix;
+                        display_name = remainder;
+                    } else {
+                        created = metadata.created().unwrap_or(SystemTime::UNIX_EPOCH);
+                        display_name = name.clone();
+                    }
+                    let display_offset = name
+                        .chars()
+                        .count()
+                        .saturating_sub(display_name.chars().count());
+                    let is_flutter = entry_path.join("pubspec.yaml").exists();
+                    let is_go = entry_path.join("go.mod").exists();
+                    let is_python = entry_path.join("pyproject.toml").exists()
+                        || entry_path.join("requirements.txt").exists();
+                    self.all_entries.push(TryEntry {
+                        name,
+                        display_name,
+                        display_offset,
+                        match_indices: Vec::new(),
+                        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        created,
+                        score: 0,
+                        is_git,
+                        is_worktree,
+                        is_worktree_locked,
+                        is_gitmodules,
+                        is_mise,
+                        is_cargo,
+                        is_maven,
+                        is_flutter,
+                        is_go,
+                        is_python,
+                    });
+                }
+            }
+        }
+        self.all_entries.sort_by(|a, b| b.modified.cmp(&a.modified));
     }
 
     pub fn has_exact_match(&self) -> bool {
@@ -347,6 +452,62 @@ impl App {
                 }
             };
         }
+        self.mode = AppMode::Normal;
+    }
+
+    pub fn rename_selected(&mut self) {
+        let new_name = self.rename_input.trim().to_string();
+        if new_name.is_empty() {
+            self.status_message = Some("Rename cancelled: name is empty".to_string());
+            self.mode = AppMode::Normal;
+            return;
+        }
+
+        let Some(entry) = self.filtered_entries.get(self.selected_index) else {
+            self.mode = AppMode::Normal;
+            return;
+        };
+        let old_name = entry.name.clone();
+        if new_name == old_name {
+            self.mode = AppMode::Normal;
+            return;
+        }
+
+        let old_path = self.base_path.join(&old_name);
+        let new_path = self.base_path.join(&new_name);
+
+        if new_path.exists() {
+            self.status_message = Some(format!("Error: '{}' already exists", new_name));
+            self.mode = AppMode::Normal;
+            return;
+        }
+
+        if let Err(e) = fs::rename(&old_path, &new_path) {
+            self.status_message = Some(format!("Error renaming: {}", e));
+            self.mode = AppMode::Normal;
+            return;
+        }
+
+        for e in &mut self.all_entries {
+            if e.name != old_name {
+                continue;
+            }
+            e.name = new_name.clone();
+            let display_name =
+                if let Some((_date, remainder)) = utils::extract_prefix_date(&new_name) {
+                    remainder
+                } else {
+                    new_name.clone()
+                };
+            e.display_offset = new_name
+                .chars()
+                .count()
+                .saturating_sub(display_name.chars().count());
+            e.display_name = display_name;
+            break;
+        }
+        self.update_search();
+        self.status_message = Some(format!("Renamed '{}' → '{}'", old_name, new_name));
         self.mode = AppMode::Normal;
     }
 }
@@ -518,6 +679,62 @@ fn draw_config_location_select(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, popup_area, &mut app.config_location_state);
 }
 
+fn draw_move_folder_select(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Min(6),
+            Constraint::Percentage(30),
+        ])
+        .split(area);
+
+    let popup_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(popup_layout[1])[1];
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Move Folder To ")
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(app.theme.popup_bg));
+
+    let items: Vec<ListItem> = app
+        .tries_dirs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.to_string_lossy().to_string());
+            let marker = if i == app.active_tab { " (current)" } else { "" };
+            ListItem::new(format!("{}{}", name, marker))
+                .style(Style::default().fg(app.theme.list_highlight_fg))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(app.theme.list_highlight_bg)
+                .fg(app.theme.list_selected_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    f.render_stateful_widget(list, popup_area, &mut app.move_folder_state);
+}
+
 fn draw_about_popup(f: &mut Frame, theme: &Theme) {
     let area = f.area();
     let popup_layout = Layout::default()
@@ -654,7 +871,7 @@ fn build_highlighted_name_spans(
 pub fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     mut app: App,
-) -> Result<(SelectionResult, bool)> {
+) -> Result<(SelectionResult, bool, usize)> {
     while !app.should_quit {
         terminal.draw(|f| {
             // Render background if not transparent
@@ -686,15 +903,61 @@ pub fn run_app(
                     Constraint::Percentage(right_panel_width),
                 ]
             };
+
+            let show_tabs = app.tries_dirs.len() > 1;
+            let tab_height = 1;
+            let content_with_tabs = if show_tabs {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(tab_height),
+                    ])
+                    .split(chunks[0])
+            } else {
+                Rc::new([chunks[0], chunks[0]])
+            };
+
             let content_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints(content_constraints)
-                .split(chunks[0]);
+                .split(if show_tabs { content_with_tabs[0] } else { chunks[0] });
 
             let left_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(1)])
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                ])
                 .split(content_chunks[0]);
+
+            if show_tabs {
+                let tab_names: Vec<Span> = app
+                    .tries_dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let name = p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| p.to_string_lossy().to_string());
+                        if i == app.active_tab {
+                            Span::styled(
+                                format!("[{}]", name),
+                                Style::default()
+                                    .fg(app.theme.list_highlight_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            Span::raw(format!(" {}", name))
+                        }
+                    })
+                    .collect();
+                
+                let tab_line = Paragraph::new(Line::from(tab_names))
+                    .style(Style::default().fg(app.theme.helpers_colors))
+                    .alignment(Alignment::Left);
+                f.render_widget(tab_line, content_with_tabs[1]);
+            }
 
             let search_text = Paragraph::new(app.query.clone())
                 .style(Style::default().fg(app.theme.search_title))
@@ -747,7 +1010,7 @@ pub fn run_app(
                         (entry.is_git, " ", app.theme.icon_git),
                     ];
                     let icons_width: usize = icons.iter().filter(|(f, _, _)| *f).count() * 2;
-                    let icon_width = 2; // folder icon
+                    let icon_width = 3; // folder icon
 
                     let created_dt: chrono::DateTime<Local> = entry.created.into();
                     let created_text = created_dt.format("%Y-%m-%d").to_string();
@@ -1121,24 +1384,40 @@ pub fn run_app(
                         .add_modifier(Modifier::BOLD),
                 )])
             } else {
-                Line::from(vec![
+                let mut help_parts = vec![
                     Span::styled("↑↓", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Nav | "),
                     Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Select | "),
-                    Span::styled("Ctrl-D", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+D", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Del | "),
-                    Span::styled("Ctrl-E", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+R", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Rename | "),
+                    Span::styled("Ctrl+E", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Edit | "),
-                    Span::styled("Ctrl-T", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+T", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Theme | "),
-                    Span::styled("Ctrl-A", Style::default().add_modifier(Modifier::BOLD)),
+                ];
+
+                if app.tries_dirs.len() > 1 {
+                    help_parts.extend(vec![
+                        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Tab | "),
+                    ]);
+                }
+
+                help_parts.extend(vec![
+                    Span::styled("Ctrl+A", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" About | "),
-                    Span::styled("Alt-P", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Alt+M", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Move | "),
+                    Span::styled("Alt+P", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Panel | "),
                     Span::styled("Esc/Ctrl+C", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" Quit"),
-                ])
+                ]);
+
+                Line::from(help_parts)
             };
 
             let help_message = Paragraph::new(help_text)
@@ -1152,6 +1431,11 @@ pub fn run_app(
             {
                 let msg = format!("Delete '{}'?\n(y/n)", selected.name);
                 draw_popup(f, " WARNING ", &msg, &app.theme);
+            }
+
+            if app.mode == AppMode::RenamePrompt {
+                let msg = format!("{}_", app.rename_input);
+                draw_popup(f, " Rename ", &msg, &app.theme);
             }
 
             if app.mode == AppMode::ThemeSelect {
@@ -1173,6 +1457,10 @@ pub fn run_app(
 
             if app.mode == AppMode::About {
                 draw_about_popup(f, &app.theme);
+            }
+
+            if app.mode == AppMode::MoveFolder {
+                draw_move_folder_select(f, &mut app);
             }
         })?;
 
@@ -1196,6 +1484,14 @@ pub fn run_app(
                                 && app.selected_index == app.filtered_entries.len();
                             if !app.filtered_entries.is_empty() && !is_new_selected {
                                 app.mode = AppMode::DeleteConfirm;
+                            }
+                        } else if c == 'r' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                            let is_new_selected = app.show_new_option
+                                && app.selected_index == app.filtered_entries.len();
+                            if !app.filtered_entries.is_empty() && !is_new_selected {
+                                app.rename_input =
+                                    app.filtered_entries[app.selected_index].name.clone();
+                                app.mode = AppMode::RenamePrompt;
                             }
                         } else if c == 'e' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
                             if app.editor_cmd.is_some() {
@@ -1234,6 +1530,16 @@ pub fn run_app(
                             app.mode = AppMode::ThemeSelect;
                         } else if c == 'a' && key.modifiers.contains(event::KeyModifiers::CONTROL) {
                             app.mode = AppMode::About;
+                        } else if matches!(c, 'm')
+                            && key.modifiers.contains(event::KeyModifiers::ALT)
+                        {
+                            if !app.filtered_entries.is_empty() {
+                                app.move_folder_state.select(Some(0));
+                                app.mode = AppMode::MoveFolder;
+                            } else {
+                                app.status_message =
+                                    Some("No folder selected to move".to_string());
+                            }
                         } else if matches!(c, 'p')
                             && key.modifiers.contains(event::KeyModifiers::ALT)
                         {
@@ -1284,6 +1590,22 @@ pub fn run_app(
                             app.selected_index += 1;
                         }
                     }
+                    KeyCode::Left => {
+                        if app.tries_dirs.len() > 1 {
+                            let prev = if app.active_tab == 0 {
+                                app.tries_dirs.len() - 1
+                            } else {
+                                app.active_tab - 1
+                            };
+                            app.switch_tab(prev);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if app.tries_dirs.len() > 1 {
+                            let next = (app.active_tab + 1) % app.tries_dirs.len();
+                            app.switch_tab(next);
+                        }
+                    }
                     KeyCode::Enter => {
                         let is_new_selected =
                             app.show_new_option && app.selected_index == app.filtered_entries.len();
@@ -1311,6 +1633,25 @@ pub fn run_app(
                     }
                     KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                         app.should_quit = true;
+                    }
+                    _ => {}
+                },
+
+                AppMode::RenamePrompt => match key.code {
+                    KeyCode::Enter => {
+                        app.rename_selected();
+                    }
+                    KeyCode::Esc => {
+                        app.mode = AppMode::Normal;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        app.mode = AppMode::Normal;
+                    }
+                    KeyCode::Backspace => {
+                        app.rename_input.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.rename_input.push(c);
                     }
                     _ => {}
                 },
@@ -1390,9 +1731,10 @@ pub fn run_app(
                                     if let Err(e) = save_config(
                                         path,
                                         &app.theme,
-                                        &app.base_path,
+                                        &app.tries_dirs,
                                         &app.editor_cmd,
                                         app.apply_date_prefix,
+                                        app.date_prefix_format.clone(),
                                         Some(app.transparent_background),
                                         Some(app.show_disk),
                                         Some(app.show_preview),
@@ -1479,9 +1821,10 @@ pub fn run_app(
                             if let Err(e) = save_config(
                                 &path,
                                 &app.theme,
-                                &app.base_path,
+                                &app.tries_dirs,
                                 &app.editor_cmd,
                                 app.apply_date_prefix,
+                                app.date_prefix_format.clone(),
                                 Some(app.transparent_background),
                                 Some(app.show_disk),
                                 Some(app.show_preview),
@@ -1508,11 +1851,62 @@ pub fn run_app(
                     }
                     _ => {}
                 },
+                AppMode::MoveFolder => match key.code {
+                    KeyCode::Esc | KeyCode::Char('c')
+                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                    {
+                        app.mode = AppMode::Normal;
+                    }
+                    KeyCode::Up | KeyCode::Char('k' | 'p') => {
+                        let i = match app.move_folder_state.selected() {
+                            Some(i) => i.saturating_sub(1),
+                            None => 0,
+                        };
+                        app.move_folder_state.select(Some(i));
+                    }
+                    KeyCode::Down | KeyCode::Char('j' | 'n') => {
+                        let i = match app.move_folder_state.selected() {
+                            Some(i) => (i + 1).min(app.tries_dirs.len().saturating_sub(1)),
+                            None => 0,
+                        };
+                        app.move_folder_state.select(Some(i));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(target_idx) = app.move_folder_state.selected() {
+                            if let Some(selected_entry) =
+                                app.filtered_entries.get(app.selected_index)
+                            {
+                                let name = selected_entry.name.clone();
+                                let src = app.base_path.join(&name);
+                                let dst = app.tries_dirs[target_idx].join(&name);
+                                if src.exists() && dst.exists() {
+                                    app.status_message = Some(format!(
+                                        "Folder '{}' already exists in target",
+                                        name
+                                    ));
+                                } else if let Err(e) = fs::rename(&src, &dst) {
+                                    app.status_message =
+                                        Some(format!("Error moving folder: {}", e));
+                                } else {
+                                    app.all_entries.retain(|e| e.name != name);
+                                    app.update_search();
+                                    app.status_message = Some(format!(
+                                        "Moved '{}' to {}",
+                                        name,
+                                        app.tries_dirs[target_idx].display()
+                                    ));
+                                }
+                            }
+                        }
+                        app.mode = AppMode::Normal;
+                    }
+                    _ => {}
+                },
             }
         }
     }
 
-    Ok((app.final_selection, app.wants_editor))
+    Ok((app.final_selection, app.wants_editor, app.active_tab))
 }
 
 #[cfg(test)]

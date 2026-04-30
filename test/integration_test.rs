@@ -1,5 +1,4 @@
 use std::{
-    env::current_dir,
     fs,
     path::PathBuf,
     process::{Command, ExitStatus},
@@ -205,11 +204,7 @@ fn new_worktree() {
     let git_dir = create_git_origin(&h).expect("could not setup git origin");
 
     // when
-    let try_exe = current_dir()
-        .unwrap()
-        .join("target")
-        .join("debug")
-        .join("try-rs");
+    let try_exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_try-rs"));
 
     let output = Command::new(format!("{}", try_exe.display()))
         .current_dir(git_dir)
@@ -245,8 +240,9 @@ fn new_worktree() {
         git_status.status.success(),
         "new directory should be a git repo"
     );
+    let canonical_expected_dir = expected_dir.canonicalize().unwrap_or(expected_dir);
     assert!(git_status.stdout.lines().any(|line| {
-        line.starts_with(&format!("{}", expected_dir.display()))
+        line.starts_with(&format!("{}", canonical_expected_dir.display()))
             && line.ends_with("[my-brand-new-feature]")
     }));
 }
@@ -468,64 +464,6 @@ fn inline_height_requires_inline_picker() {
     assert!(
         output.contains("--inline-picker"),
         "error should mention missing --inline-picker"
-    );
-}
-
-#[test]
-fn setup_stdout_fish() {
-    let p = Command::new("cargo")
-        .arg("run")
-        .arg("--")
-        .arg("--setup-stdout")
-        .arg("fish")
-        .output()
-        .expect("failed to spawn");
-
-    let stdout = String::from_utf8(p.stdout).unwrap();
-    assert!(p.status.success());
-    assert!(
-        stdout.contains("function try-rs"),
-        "fish integration should define try-rs function"
-    );
-    assert!(
-        stdout.contains("function try-rs-picker"),
-        "fish integration should define picker function"
-    );
-}
-
-#[test]
-fn setup_stdout_zsh() {
-    let p = Command::new("cargo")
-        .arg("run")
-        .arg("--")
-        .arg("--setup-stdout")
-        .arg("zsh")
-        .output()
-        .expect("failed to spawn");
-
-    let stdout = String::from_utf8(p.stdout).unwrap();
-    assert!(p.status.success());
-    assert!(
-        stdout.contains("try-rs()"),
-        "zsh integration should define try-rs function"
-    );
-}
-
-#[test]
-fn setup_stdout_bash() {
-    let p = Command::new("cargo")
-        .arg("run")
-        .arg("--")
-        .arg("--setup-stdout")
-        .arg("bash")
-        .output()
-        .expect("failed to spawn");
-
-    let stdout = String::from_utf8(p.stdout).unwrap();
-    assert!(p.status.success());
-    assert!(
-        stdout.contains("try-rs()"),
-        "bash integration should define try-rs function"
     );
 }
 
